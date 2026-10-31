@@ -1,3 +1,4 @@
+
 // ==UserScript==
 // @name         Crack 일본어 대사 한글 발음 호버
 // @namespace    https://crack.wrtn.ai/
@@ -1371,44 +1372,99 @@
         dismissedSelectionRange = currentTextSelection();
     }
 
-    // 작은 발음 버튼은 채팅 헤더 바로 아래의 오른쪽 끝을 따라갑니다.
-    // PC·모바일 모두 같은 위치에서 선택 발음을 실행할 수 있습니다.
+    // 실제 채팅 메뉴 줄을 측정하므로 CMU 유무와 PC/모바일에 의존하지 않습니다.
+    let dockResizeObserver = null;
+    let dockObservedElements = new Set();
+
     function positionPronunciationDock() {
         if (mobileDock.hidden) return;
-        const viewportWidth = window.innerWidth;
-        const viewportTop = window.visualViewport?.offsetTop || 0;
-        const viewportHeight = window.visualViewport?.height || window.innerHeight;
-        let contentBounds = { left: 0, right: viewportWidth };
-        const messages = [...document.querySelectorAll('[data-message-group-id]')].slice(0, 20);
-        const message = messages.find((element) => {
+        const vv = window.visualViewport;
+        const view = {
+            left: vv?.offsetLeft || 0, top: vv?.offsetTop || 0,
+            width: vv?.width || window.innerWidth,
+            height: vv?.height || window.innerHeight,
+        };
+        const viewRight = view.left + view.width;
+        const viewBottom = view.top + view.height;
+        const visibleRect = (element) => {
             const rect = element.getBoundingClientRect();
-            return rect.width >= 180 && rect.right > 0 && rect.left < viewportWidth;
-        });
-        const main = message?.closest('main, [role="main"]') || document.querySelector('main, [role="main"]');
-        const candidateBounds = (main || message)?.getBoundingClientRect();
-        if (candidateBounds?.width >= 180) contentBounds = candidateBounds;
-        const headers = [...document.querySelectorAll('header, [role="banner"], [data-chat-header], [data-testid*="chat-header"], .sticky.top-0')]
-            .filter((element) => !element.closest(`#${SCRIPT_ID}-host, aside, nav, [role="dialog"]`))
-            .map((element) => element.getBoundingClientRect())
-            .filter((rect) => rect.height >= 24 && rect.height <= 150 && rect.top >= viewportTop - 8
-                && rect.bottom <= viewportTop + 180 && rect.width >= 180
-                && rect.right > contentBounds.left + 80 && rect.left < contentBounds.right - 80)
-            .sort((a, b) => Math.abs(a.right - contentBounds.right) - Math.abs(b.right - contentBounds.right));
-        const top = Math.max(viewportTop + 8, headers[0] ? headers[0].bottom + 5 : viewportTop + 64);
+            const style = getComputedStyle(element);
+            if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0
+                || rect.width < 1 || rect.height < 1 || rect.bottom <= view.top
+                || rect.top >= viewBottom || rect.right <= view.left || rect.left >= viewRight) return null;
+            if (!element.getClientRects().length) return null;
+            return rect;
+        };
+        const controls = [...document.querySelectorAll(
+            'button[aria-label="메시지 검색"], button[aria-label="사이드 패널 열기"], button[aria-label="사이드 패널 닫기"]'
+        )].filter((element) => !element.closest('aside, nav, [role="dialog"]'));
+        const control = controls.find((element) => visibleRect(element));
+        const main = control?.closest('main, [role="main"]') || document.querySelector('main, [role="main"]');
+        let chatHeader = null;
+        for (let element = control?.parentElement, depth = 0; element && element !== main && depth < 7; element = element.parentElement, depth++) {
+            const rect = visibleRect(element);
+            if (rect && rect.width >= 180 && rect.height >= 24 && rect.height <= 160
+                && element.classList.contains('justify-between')) { chatHeader = element; break; }
+        }
+        const bounds = (chatHeader && visibleRect(chatHeader)) || (main && visibleRect(main));
+        const contentLeft = Math.max(view.left + 8, bounds?.left ?? view.left + 8);
+        const rightEdge = Math.max(contentLeft + 1, Math.min(viewRight - 8, (bounds?.right ?? viewRight) - 8));
+        const headerElements = new Set(document.querySelectorAll(
+            'header, [role="banner"], [data-chat-header], [data-testid*="chat-header"], .sticky.top-0, '
+            + '#wrtn-custom-global-header, [data-crack-ui-header="1"], [data-cmu-global-header="1"]'
+        ));
+        // 크랙은 header 태그가 아닌 absolute div에 채팅 메뉴를 넣습니다.
+        for (const button of controls) {
+            let element = button;
+            for (let depth = 0; element && element !== main && depth < 7; depth++, element = element.parentElement) {
+                const rect = element.getBoundingClientRect();
+                if (rect.height >= 24 && rect.height <= 160) headerElements.add(element);
+            }
+        }
+        const observed = new Set(main ? [main] : []);
+        let headerBottom = view.top;
+        let foundHeader = false;
+        for (const element of headerElements) {
+            if (element.closest('aside, nav, [role="dialog"]')) continue;
+            const rect = visibleRect(element);
+            if (!rect || rect.height > 160 || rect.top > view.top + Math.min(260, view.height * .45)
+                || rect.right <= contentLeft || rect.left >= rightEdge) continue;
+            observed.add(element);
+            headerBottom = Math.max(headerBottom, rect.bottom);
+            foundHeader = true;
+        }
         const dockWidth = mobileDock.offsetWidth || 78;
-        const rightEdge = Math.min(viewportWidth - 8, contentBounds.right - 8);
-        const left = Math.max(8, rightEdge - dockWidth);
+        const dockHeight = mobileDock.offsetHeight || 28;
+        const left = Math.max(view.left + 8, rightEdge - dockWidth);
+        const top = Math.max(view.top + 8, Math.min(
+            foundHeader ? headerBottom + 6 : view.top + 64,
+            viewBottom - dockHeight - 8
+        ));
         mobileDock.style.left = `${Math.round(left)}px`;
         mobileDock.style.right = 'auto';
-        mobileDock.style.top = `${Math.round(top)}px`;
+        mobileDock.style.top = `${Math.ceil(top)}px`;
         mobileDock.style.bottom = 'auto';
-        const outputTop = top + (mobileDock.offsetHeight || 28) + 6;
-        const outputWidth = Math.min(360, viewportWidth - 24);
-        mobileOutput.style.left = `${Math.max(8, Math.round(rightEdge - outputWidth))}px`;
+        const outputWidth = Math.max(1, Math.min(360, view.width - 24));
+        const availableBelow = viewBottom - (top + dockHeight + 6) - 8;
+        const outputHeight = Math.max(1, Math.min(view.height * .46,
+            availableBelow >= 100 ? availableBelow : top - view.top - 14));
+        const outputTop = availableBelow >= 100 ? top + dockHeight + 6 : Math.max(view.top + 6, top - outputHeight - 6);
+        mobileOutput.style.width = `${outputWidth}px`;
+        mobileOutput.style.left = `${Math.max(view.left + 8, Math.round(rightEdge - outputWidth))}px`;
         mobileOutput.style.right = 'auto';
-        mobileOutput.style.top = `${Math.round(outputTop)}px`;
+        mobileOutput.style.top = `${Math.ceil(outputTop)}px`;
         mobileOutput.style.bottom = 'auto';
-        mobileOutput.style.maxHeight = `${Math.max(80, Math.min(viewportHeight * 0.46, viewportTop + viewportHeight - outputTop - 12))}px`;
+        mobileOutput.style.maxHeight = `${outputHeight}px`;
+        if (typeof ResizeObserver === 'function') {
+            if (!dockResizeObserver) dockResizeObserver = new ResizeObserver(scheduleDockPlacement);
+            for (const element of dockObservedElements) {
+                if (!observed.has(element)) dockResizeObserver.unobserve(element);
+            }
+            for (const element of observed) {
+                if (!dockObservedElements.has(element)) dockResizeObserver.observe(element);
+            }
+            dockObservedElements = observed;
+        }
     }
 
     function scheduleDockPlacement() {
@@ -1416,7 +1472,7 @@
         dockPlacementTimer = window.setTimeout(() => {
             dockPlacementTimer = 0;
             positionPronunciationDock();
-        }, 120);
+        }, 32);
     }
 
     function syncMobileDock() {
@@ -1628,6 +1684,15 @@
             if (tooltip.style.display !== 'none') positionTooltip(activeHit.unit.range);
         }
     }, { passive: true });
+    window.addEventListener('orientationchange', scheduleDockPlacement, { passive: true });
+    // CSS transform 애니메이션은 크기가 같아도 위치가 바뀌므로 완료 시 재측정합니다.
+    document.addEventListener('transitionend', scheduleDockPlacement, true);
+    document.addEventListener('animationend', scheduleDockPlacement, true);
+    const dockLayoutObserver = new MutationObserver(scheduleDockPlacement);
+    dockLayoutObserver.observe(document.documentElement, {
+        subtree: true, attributes: true,
+        attributeFilter: ['class', 'style', 'hidden', 'aria-expanded', 'data-state'],
+    });
     window.visualViewport?.addEventListener('resize', scheduleDockPlacement, { passive: true });
     window.visualViewport?.addEventListener('scroll', scheduleDockPlacement, { passive: true });
 
